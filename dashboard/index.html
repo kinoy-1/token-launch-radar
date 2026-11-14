@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <p class="eyebrow">Token Radar &middot; model radar-2</p>
+    <h1>Which pre-token protocol is worth farming next?</h1>
+    <p class="lede">Every protocol in the sealed snapshot that records no token, ranked by the
+    implied value of the token it might one day issue &mdash; and a concrete farm plan
+    for each one. The value follows from the protocol's own figures: its TVL, its
+    seven-day growth, how long it has run with no token, and how many chains it runs on.</p>
+    <p class="meta" id="meta">Loading the snapshot&hellip;</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="stats" id="stats" aria-label="Board totals"></section>
+
+  <section class="controls" aria-label="Board controls">
+    <label class="ctl">Search
+      <input id="q" type="search" placeholder="Name or slug&hellip;" autocomplete="off">
+    </label>
+    <label class="ctl">Category
+      <select id="cat"><option value="">All categories</option></select>
+    </label>
+    <label class="ctl">Chain
+      <select id="chain"><option value="">All chains</option></select>
+    </label>
+    <label class="ctl">Board
+      <select id="scope">
+        <option value="all">All 225 ranked</option>
+        <option value="watchlist">Watchlist only (40)</option>
+        <option value="early">Early finds only (185)</option>
+      </select>
+    </label>
+    <label class="ctl">Sort by
+      <select id="sort">
+        <option value="rank">Rank (implied value)</option>
+        <option value="tvl">TVL, high to low</option>
+        <option value="growth">7-day growth, high to low</option>
+        <option value="age">Age, oldest first</option>
+        <option value="name">Name, A to Z</option>
+      </select>
+    </label>
+    <p class="count" id="count"></p>
+  </section>
+
+  <section id="detail" class="detail" hidden></section>
+
+  <section class="board-section" aria-label="Ranked board">
+    <table class="board" id="board">
+      <thead>
+        <tr>
+          <th data-k="rank" class="num">Rank</th>
+          <th data-k="name">Protocol</th>
+          <th data-k="category">Category</th>
+          <th data-k="chains">Chains</th>
+          <th data-k="tvl" class="num">TVL</th>
+          <th data-k="growth" class="num">7d</th>
+          <th data-k="age" class="num">Age</th>
+          <th data-k="implied" class="num">Implied value</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="hint">Click a row for the protocol's detail view &mdash; its model breakdown and its seven-step farm plan.</p>
+  </section>
+
+  <section class="chart-block" aria-label="Top ten by implied value">
+    <h2>Top 10 by implied value</h2>
+    <div id="chart"></div>
+  </section>
+
+  <section class="live" aria-label="Protocols whose token already trades">
+    <h2>Already has a token &mdash; shown for comparison, never ranked</h2>
+    <p class="live-note">These protocols record a token, so the board does not rank them. Their market
+    cap is the market's own value, not a model's. They are here so a reader can see what a
+    launched token is actually worth next to the board's implied values.</p>
+    <table class="board" id="liveBoard">
+      <thead>
+        <tr>
+          <th>Protocol</th>
+          <th>Category</th>
+          <th class="num">TVL</th>
+          <th class="num">Market cap</th>
+          <th class="num">7d</th>
+        </tr>
+      </thead>
+      <tbody id="liveRows"></tbody>
+    </table>
+  </section>
+
+  <section class="model" aria-label="How the implied value is computed">
+    <h2>How the implied value is computed</h2>
+    <p>Every row is scored by the same function, from the snapshot's figures alone. No
+    protocol name is special-cased.</p>
+    <pre>implied = TVL &times; 0.30 &times; growth &times; maturity &times; chains
+  growth   = 1 + clamp(7d change, -50, +100) / 100 &times; 0.75
+  maturity = 0.55 + 0.45 &times; min(age in days, 1095) / 1095
+  chains   = 1 + 0.03 &times; min(extra chains, 5)</pre>
+    <p>A token's fully diluted value usually tracks the value locked in its protocol, so
+    TVL is the anchor. A protocol whose TVL is growing is winning users right now, so
+    growth lifts the value &mdash; and the weight is deliberately strong (0.75) so the
+    board is not a plain TVL table. A protocol that has run one to three years with no
+    token has proved it can keep users without one, so age lifts it toward a full
+    multiple. A protocol on several chains has more places to issue and more users to
+    reach, so each extra chain adds a little. A protocol is ranked only when it records
+    no token and is not a wrapped, staked or bridged product of a token that already
+    trades: WBTC, Binance staked ETH and USDT0 are never ranked, because each is a
+    product of a token that already trades.</p>
+    <p class="fine">Implied value is this entry's own claim, never a prediction that a token
+    will be issued or when. Say a protocol records no token, never that it has none:
+    a protocol on the board may still have a token its record does not carry.</p>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>Token Radar &middot; model radar-2 &middot; data: DefiLlama protocol snapshot, sealed at the competition's opening. The board ranks every pre-token protocol the snapshot can rank.</p>
+  </div>
+</footer>
+
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
