@@ -1,8 +1,9 @@
 // Token launch radar dashboard — renders window.RADAR_DATA, no network.
-// Views: board, detail, audit (model & audit), comps. The initial view,
-// the selected protocol and the board filters come from the URL query so
-// a screenshot can open any state directly, e.g. ?view=audit or
-// ?view=detail&slug=steakhouse-financial or ?view=board&cat=RWA.
+// Views: board, detail, farm (farm next), ledger (all 758), audit
+// (model & audit), comps. The initial view, the selected protocol and
+// the board filters come from the URL query so a screenshot can open any
+// state directly, e.g. ?view=audit or ?view=detail&slug=bitfi-basis or
+// ?view=board&cat=RWA or ?view=ledger.
 const D = window.RADAR_DATA;
 const $ = (id) => document.getElementById(id);
 
@@ -24,11 +25,13 @@ let sortKey = 'rank';
 let sortDir = 1;
 
 function showView(name) {
-  for (const v of ['board', 'detail', 'audit', 'comps']) {
+  for (const v of ['board', 'detail', 'farm', 'ledger', 'audit', 'comps']) {
     $('view-' + v).classList.toggle('hidden', v !== name);
     document.querySelector('[data-view="' + v + '"]').classList.toggle('active', v === name);
   }
   if (name === 'detail') renderDetail(currentSlug);
+  if (name === 'farm') renderFarm();
+  if (name === 'ledger') renderLedger();
   if (name === 'audit') renderAudit();
   if (name === 'comps') renderComps();
 }
@@ -42,13 +45,15 @@ function topStats() {
     '<span>' + D.nComps + ' comps</span><span>snapshot ' + esc(D.asOf) + '</span>';
   $('asOf').textContent = D.asOf;
   const c = D.loo;
+  const wf = D.walkForward.map((f) => f.medianAbsLog);
+  const wfMed = wf.length ? (wf.reduce((s, x) => s + x, 0) / wf.length).toFixed(2) : '—';
   $('statCards').innerHTML =
     card(fmtInt(D.boardRows), 'pre-token protocols ranked') +
-    card(D.fit.b.toFixed(2), 'size-curve slope b (log-log fit)') +
-    card('R² ' + D.fit.r2.toFixed(2), 'fit on ' + D.nComps + ' comps') +
+    card(D.odds.cvAuc.toFixed(2), 'listing-odds AUC (5-fold CV)') +
+    card(wfMed, 'walk-forward median |log error|') +
     card(fmtX(D.bandK), 'uncertainty band k (LOO)') +
     card(c.medianAbsLog.toFixed(2), 'LOO median |log error|') +
-    card(c.within2x.toFixed(0) + '%', 'comps predicted within 2x');
+    card(fmtInt(D.ledger.length), 'protocols accounted for');
   function card(b, s) { return '<div class="card"><b>' + b + '</b><span>' + s + '</span></div>'; }
 }
 
@@ -84,8 +89,8 @@ function renderBoard() {
       '<td>' + esc(r.category || '—') + '</td>' +
       '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
       '<td class="num">' + fmtUsd(r.implied_value_usd) + '</td>' +
-      '<td class="num">' + fmtUsd(r.low_usd) + '</td>' +
-      '<td class="num">' + fmtX(r.multiple) + '</td>' +
+      '<td class="num">' + r.odds.toFixed(2) + '</td>' +
+      '<td class="num">' + fmtUsd(r.implied_usd) + '</td>' +
       '<td>' + verdictChip(r.farm.verdict) + '</td></tr>';
   }).join('');
   document.querySelectorAll('#boardBody tr').forEach((tr) => {
@@ -128,7 +133,8 @@ function renderDetail(slug) {
     ['Size curve', 'exp(' + D.fit.a.toFixed(4) + ') × TVL^' + D.fit.b.toFixed(4) + ' = ' + fmtUsd(Math.exp(D.fit.a) * Math.pow(r.tvl_usd, D.fit.b))],
     ['Growth', '7d ' + (r.change_7d === null ? 'unreported' : r.change_7d.toFixed(1) + '%') + ' → ' + r.growth_factor.toFixed(3) + 'x'],
     ['Maturity', r.age_days + ' days old → ' + r.maturity_factor.toFixed(3) + 'x'],
-    ['Stage discount', 'pre-token prior → 0.600x'],
+    ['Listing odds', 'P(records a token) fitted from age, size, 7d change and the category listing rate → ' + r.odds.toFixed(2)],
+    ['Expected value', 'implied $' + fmtInt(r.implied_usd) + ' × odds ' + r.odds.toFixed(2) + ' = $' + fmtInt(r.implied_value_usd)],
   ];
   // For curator rows the 0.5 curator discount IS the category factor —
   // it replaces the table factor, it is not applied on top of it. The
@@ -142,12 +148,14 @@ function renderDetail(slug) {
     (r.on_watchlist ? ' · <span class="chip watch">watchlist</span>' : '') +
     (r.concern ? ' · <span class="chip flag">flagged</span>' : '') + '</p>' +
     '<div class="detail-grid">' +
-    '<div class="kv"><b>' + fmtUsd(r.implied_value_usd) + '</b><span>implied value (base case)</span></div>' +
-    '<div class="kv"><b>' + fmtUsd(r.low_usd) + ' – ' + fmtUsd(r.bull_usd) + '</b><span>low – bull band (÷/× ' + D.bandK.toFixed(2) + ')</span></div>' +
-    '<div class="kv"><b>' + fmtX(r.multiple) + '</b><span>implied multiple of TVL</span></div>' +
+    '<div class="kv"><b>' + fmtUsd(r.implied_value_usd) + '</b><span>expected launch value (ranks the board)</span></div>' +
+    '<div class="kv"><b>' + fmtUsd(r.implied_usd) + '</b><span>implied value if the token launched</span></div>' +
+    '<div class="kv"><b>' + r.odds.toFixed(2) + '</b><span>fitted odds it ever records a token</span></div>' +
+    '<div class="kv"><b>#' + r.rank_lo + ' – #' + r.rank_hi + '</b><span>rank range across 200 bootstrap refits</span></div>' +
+    '<div class="kv"><b>' + fmtUsd(r.low_usd) + ' – ' + fmtUsd(r.bull_usd) + '</b><span>expected low – bull band (÷/× ' + D.bandK.toFixed(2) + ')</span></div>' +
     '<div class="kv"><b>' + fmtUsd(r.tvl_usd) + '</b><span>TVL</span></div>' +
-    '<div class="kv"><b>' + verdictChip(f.verdict) + '</b><span>farm verdict at the low end</span></div>' +
-    '<div class="kv"><b>' + fmtUsd(f.evLowUsd) + ' – ' + fmtUsd(f.evHighUsd) + '</b><span>expected airdrop slice (5–25% of low)</span></div>' +
+    '<div class="kv"><b>' + verdictChip(f.verdict) + '</b><span>farm verdict at the expected low end</span></div>' +
+    '<div class="kv"><b>' + fmtUsd(f.evLowUsd) + ' – ' + fmtUsd(f.evHighUsd) + '</b><span>expected airdrop slice (5–25% of expected low)</span></div>' +
     '</div>' +
     '<h3>How the value is built</h3>' +
     '<table class="mini"><thead><tr><th>Factor</th><th>Detail</th></tr></thead><tbody>' +
@@ -197,12 +205,27 @@ function renderAudit() {
   const exclRows = D.exclusions.map((e) => '<tr><td>' + esc(e.slug) + '</td><td>' + esc(e.category || '—') + '</td><td class="num">' + fmtUsd(e.tvl_usd) + '</td><td>' + esc(e.reason) + '</td><td class="num">' + fmtUsd(e.counterfactual_usd || 0) + '</td></tr>').join('');
   const cfRows = D.counterfactualTop.map((e, i) => '<tr><td>' + (i + 1) + '</td><td>' + esc(e.slug) + '</td><td>' + esc(e.category || '—') + '</td><td class="num">' + fmtUsd(e.tvl_usd) + '</td><td class="num">' + fmtUsd(e.implied_usd) + '</td></tr>').join('');
   $('auditBody').innerHTML =
-    '<p class="formula">implied = exp(' + D.fit.a.toFixed(4) + ') × TVL^' + D.fit.b.toFixed(4) + ' × categoryFactor × growth × maturity × 0.6' +
+    '<p class="formula">expected = implied × P(list) &nbsp;·&nbsp; implied = exp(' + D.fit.a.toFixed(4) + ') × TVL^' + D.fit.b.toFixed(4) + ' × categoryFactor × growth × maturity' +
     ' &nbsp;·&nbsp; 0.10 for flagged rows</p>' +
     '<p>Fit on the snapshot’s own ' + D.nComps + ' traded comparables (market cap above zero and TVL above zero; 16 recorded comps with market cap at or below zero are dead tokens and are left out). ' +
-    'The 0.6 stage discount is a disclosed prior, not a fit: comparables already trade, pre-token rows do not. ' +
+    'The flat 0.6 stage discount of earlier rounds is retired: the listing-odds model fits the same fact from the data, per row — a protocol that has run five years with no token is not worth the same discount as one that appeared five weeks ago. ' +
     'For curator rows the category factor is the 0.5 curator discount, which replaces the table factor (Risk Curators’ table factor is 1.000, Onchain Capital Allocator’s 0.828 — neither is applied on top of the discount). ' +
     'Uncertainty band k = ' + D.bandK.toFixed(3) + ' (exp of the LOO median |log error|, clamped to 1.5–4).</p>' +
+    '<h3>Listing odds — P(records a token)</h3>' +
+    '<p>Logistic model fitted on all ' + D.odds.n + ' protocols (label: records a token — mcap, gecko_id or symbol present; base rate ' + (D.odds.baseRate * 100).toFixed(1) + '%). ' +
+    'Features, standardised: age in years, log10 TVL, 7-day change clamped to [−60, +120]%, and the category listing rate (leave-one-out, the row itself excluded). ' +
+    '5-fold cross-validated AUC ' + D.odds.cvAuc.toFixed(3) + ' — age alone scores ' + D.odds.ageOnlyAuc.toFixed(3) + ' on the same folds, so size, change and category carry real signal on top of age. ' +
+    'Coefficients (standardised): intercept ' + D.odds.intercept.toFixed(2) + ', age ' + D.odds.beta[0].toFixed(2) + ', log TVL ' + D.odds.beta[1].toFixed(2) + ', 7d change ' + D.odds.beta[2].toFixed(2) + ', category rate ' + D.odds.beta[3].toFixed(2) + '. ' +
+    'The change coefficient is negative: among protocols that already record a token, TVL growth has usually cooled — read it as fitted, not as a cause. Calibration (out-of-fold):</p>' +
+    '<table class="mini"><thead><tr><th>Predicted odds</th><th class="num">Rows</th><th class="num">Actually record a token</th><th class="num">Mean predicted</th></tr></thead><tbody>' +
+    D.odds.bins.map((b) => '<tr><td>' + b.lo.toFixed(1) + ' – ' + b.hi.toFixed(1) + '</td><td class="num">' + b.n + '</td><td class="num">' + (b.actual * 100).toFixed(1) + '%</td><td class="num">' + (b.predicted * 100).toFixed(1) + '%</td></tr>').join('') +
+    '</tbody></table>' +
+    '<h3>Walk-forward — fit on the past, test on the future</h3>' +
+    '<p>The snapshot carries one as-of date, but listed_at is the day DefiLlama began tracking each protocol — a time axis. The curve is fitted on comparables first tracked before the cutoff and tested on those first tracked after it, expanding window:</p>' +
+    '<table class="mini"><thead><tr><th>Cutoff</th><th class="num">Train</th><th class="num">Test</th><th class="num">Train R²</th><th class="num">Median |log|</th><th class="num">Within 2x</th></tr></thead><tbody>' +
+    D.walkForward.map((f) => '<tr><td>' + f.cutoff + '</td><td class="num">' + f.nTrain + '</td><td class="num">' + f.nTest + '</td><td class="num">' + f.r2.toFixed(2) + '</td><td class="num">' + f.medianAbsLog.toFixed(3) + '</td><td class="num">' + f.within2x.toFixed(1) + '%</td></tr>').join('') +
+    '</tbody></table>' +
+    '<p class="muted">Held out twice: leave-one-out (every comparable predicted from the other 127) and this walk-forward. A model that only fits the past it trained on fails the second test; this one holds up — the walk-forward medians sit at or below the LOO median.</p>' +
     '<h3>Calibration by category</h3>' +
     '<p class="muted">Per-category median mcap/TVL, shrunk toward the global median (' + D.globalMedianRatio.toFixed(3) + ') with prior weight 4, clamped to [0.15, 2.0], damped with γ = 0.5. Categories with fewer than 2 comparables fall back to a factor of 1.</p>' +
     '<table class="mini"><thead><tr><th>Category</th><th class="num">Comps</th><th class="num">Median ratio</th><th class="num">Factor used</th></tr></thead><tbody>' + catRows + '</tbody></table>' +
@@ -214,7 +237,7 @@ function renderAudit() {
     'Random 5-fold cross-validation median |log error| ' + D.cv5MedianAbsLog.toFixed(3) + '.</p>' +
     '<h3>What was tried, and what was rejected</h3>' +
     '<table class="mini"><thead><tr><th>Model</th><th class="num">Median |log|</th><th class="num">MAPE</th><th class="num">Within 2x</th></tr></thead><tbody>' + candRows + '</tbody></table>' +
-    '<p class="muted">Read honestly: dropping the category factor (γ = 0) scores slightly better on LOO than the chosen γ = 0.5, and the curve alone is close too. The factor is kept anyway, on judgment: without it, Liquid Staking rows (median ratio 0.041) would be valued about five times too high and Basis Trading (0.654) at about a third of its market rate — the wrong direction for anyone who knows the market. What the table proves is that the size curve itself is essential: without it the error jumps from 1.27 to 1.61. The robust (one trim round) variant scores a touch better on LOO (1.26 vs 1.27) but was not adopted: trimming is a judgment call that varies by fold, and the difference is within noise — OLS stays the stated model. Per-category slopes are rejected as overfitting: Dexs fits a slope of 1.78 on 11 comps while Lending fits 1.50 on 15 — the same data, opposite stories.</p>' +
+    '<p class="muted">Read honestly: dropping the category factor (γ = 0) scores slightly better on LOO than the chosen γ = 0.5 (1.165 vs 1.272), but a paired check shows the edge is outlier-driven, not systematic — γ = 0 wins 46 of 128 folds, loses 54, median paired difference 0.0000. Within noise, the factor stays, on judgment: without it, Liquid Staking rows (median ratio 0.041) would be valued about five times too high and Basis Trading (0.654) at about a third of its market rate. What the table proves is that the size curve itself is essential: without it the error jumps from 1.27 to 1.61. The multi-feature regression (age and change as regressors) scores worse than the curve alone (1.36) and is rejected — age and change add noise, not signal, once size is in. The robust (one trim round) variant scores a touch better on LOO (1.26 vs 1.27) but was not adopted: trimming is a judgment call that varies by fold, and the difference is within noise — OLS stays the stated model. Per-category slopes are rejected as overfitting: Dexs fits a slope of 1.78 on 11 comps while Lending fits 1.50 on 15 — the same data, opposite stories.</p>' +
     '<h3>Calibration chart</h3><div class="chart">' + chartSvg() + '</div>' +
     '<p class="muted">Each dot is one of the ' + D.nComps + ' comparables. The scatter is wide — that is the point: the model’s typical error is about ' + D.bandK.toFixed(1) + 'x, and the band says so instead of hiding it.</p>' +
     '<h3>What would be #1 if the filter let it in</h3>' +
@@ -224,9 +247,47 @@ function renderAudit() {
     '<table class="mini"><thead><tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th>Reason</th><th class="num">Implied if included</th></tr></thead><tbody>' + exclRows + '</tbody></table>' +
     '<h3>Limitations, stated plainly</h3>' +
     '<div class="callout">R² is only ' + D.fit.r2.toFixed(2) + ': size explains a fifth of the variation in value, the rest is noise the snapshot cannot see. ' +
-    'Only about 3 in 10 comparables land within 2x of the model, even with the best variant tested. The stage discount (0.6) and the concern haircuts (0.10) are priors and judgments, not fits. ' +
-    'No time-split validation is claimed: the snapshot carries a single date, so out-of-sample evidence is LOO, bootstrap and 5-fold cross-validation, not a time split. ' +
-    'Implied value is the entry’s own claim about what a token would be worth if the protocol’s record stayed as it is — not a prediction of whether or when a token is issued.</div>';
+    'Only about 3 in 10 comparables land within 2x of the model, even with the best variant tested. The concern haircuts (0.10) are judgments, not fits. ' +
+    'The odds model predicts whether a protocol RECORDS a token, not whether or when it issues one — a protocol can record a token it never launched for farming, and a launch can arrive for a row the model rates low. ' +
+    'Walk-forward here is by first-tracked date, not a true time split of launches: the snapshot carries one as-of date, so the test is whether the curve fitted on older protocols predicts newer ones, not whether it predicted launches as they happened. ' +
+    'Expected value is the entry’s own claim about what a token would be worth, times how likely the record says it is to exist — not a prediction of whether or when a token is issued.</div>';
+}
+
+function renderFarm() {
+  $('farmBody').innerHTML = D.farmNext.map((f, i) =>
+    '<tr><td>' + (i + 1) + '</td><td>' + esc(f.name) + ' <span class="muted">(#' + f.rank + ')</span></td>' +
+    '<td class="num">' + fmtUsd(f.expected_usd) + '</td><td class="num">$' + fmtInt(f.capital_usd) + '</td>' +
+    '<td class="num">$' + fmtInt(f.net_low_usd) + '</td><td class="num">' + f.net_per_dollar.toFixed(0) + 'x</td>' +
+    '<td>' + verdictChip(f.verdict) + '</td></tr>').join('');
+  document.querySelectorAll('#farmBody tr').forEach((tr, i) => {
+    tr.addEventListener('click', () => {
+      currentSlug = D.farmNext[i].slug;
+      showView('detail');
+    });
+  });
+}
+
+function renderLedger() {
+  const groups = D.ledgerGroups.map((g) => g.group);
+  if (!$('ledgerGroup').options.length) {
+    $('ledgerGroup').innerHTML = '<option value="">All dispositions</option>' +
+      groups.map((g) => '<option value="' + esc(g) + '">' + esc(g) + ' (' + D.ledgerGroups.find((x) => x.group === g).n + ')</option>').join('');
+  }
+  const g = $('ledgerGroup').value;
+  const q = ($('ledgerQ').value || '').toLowerCase();
+  const rows = D.ledger.filter((r) => {
+    if (g && r.disposition !== g) return false;
+    if (q && !(r.name.toLowerCase().includes(q) || r.slug.includes(q))) return false;
+    return true;
+  });
+  $('ledgerCount').textContent = rows.length + ' of ' + D.ledger.length + ' protocols';
+  $('ledgerBody').innerHTML = rows.map((r) =>
+    '<tr><td>' + esc(r.name) + '<br><span class="muted">' + esc(r.slug) + '</span></td>' +
+    '<td>' + esc(r.category || '—') + '</td>' +
+    '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
+    '<td>' + esc(r.disposition) + '</td>' +
+    '<td>' + esc(r.detail) + '</td>' +
+    '<td class="num">' + (r.value_usd === null ? '—' : fmtUsd(r.value_usd)) + '</td></tr>').join('');
 }
 
 function renderComps() {
@@ -235,9 +296,14 @@ function renderComps() {
     '<td class="num">' + fmtUsd(c.tvl_usd) + '</td><td class="num">' + fmtUsd(c.mcap_usd) + '</td><td class="num">' + c.ratio.toFixed(3) + '</td></tr>').join('');
 }
 
+['ledgerGroup', 'ledgerQ'].forEach((id) => {
+  $(id).addEventListener('input', renderLedger);
+  $(id).addEventListener('change', renderLedger);
+});
+
 topStats();
 fillCategories();
 renderBoard();
 const initialView = params.get('view') || 'board';
-if (['board', 'detail', 'audit', 'comps'].includes(initialView)) showView(initialView);
+if (['board', 'detail', 'farm', 'ledger', 'audit', 'comps'].includes(initialView)) showView(initialView);
 else showView('board');

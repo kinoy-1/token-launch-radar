@@ -106,6 +106,9 @@ const verdictCounts = radar.rows.reduce(
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.excludedRows} pre-token excluded)\n` +
     `token radar: fit log(mcap) = ${radar.fit.a.toFixed(4)} + ${radar.fit.b.toFixed(4)} log(TVL), R2 = ${radar.fit.r2.toFixed(4)}, n = ${radar.fit.n}; LOO median |log| = ${radar.loo.medianAbsLog.toFixed(4)}, band k = ${radar.bandK.toFixed(3)}\n` +
+    `token radar: odds P(list) 5-fold CV AUC = ${radar.odds.cvAuc.toFixed(3)} (age-only ${radar.odds.ageOnlyAuc.toFixed(3)}); walk-forward median |log| = ${radar.walkForward.map((f) => `${f.cutoff}:${f.medianAbsLog.toFixed(3)}`).join(' ')}\n` +
+    `token radar: ledger ${radar.ledger.length} protocols accounted for (${radar.ledgerGroups.map((g) => `${g.group} ${g.n}`).join(', ')})\n` +
+    `token radar: top by expected value: ${radar.rows.slice(0, 3).map((r) => `#${r.rank} ${r.slug} $${r.implied_value_usd.toLocaleString('en-US')} (odds ${r.odds.toFixed(2)})`).join(' | ')}\n` +
     `token radar: farm verdicts farm ${verdictCounts['farm'] ?? 0} / thin ${verdictCounts['thin'] ?? 0} / skip ${verdictCounts['skip'] ?? 0}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

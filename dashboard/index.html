@@ -3,20 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Launch Radar — comps-fitted size curve</title>
+<title>Token Launch Radar — expected launch value</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header class="top">
   <div>
     <h1>Token Launch Radar</h1>
-    <p class="sub">Every pre-token protocol priced off the snapshot's own traded comparables — a fitted size curve, not a fixed multiple.</p>
+    <p class="sub">Every pre-token protocol priced by expected launch value — implied value fitted from the snapshot's own traded comparables, times a listing-odds model fitted from the peers' own record.</p>
   </div>
   <div class="top-stats" id="topStats"></div>
 </header>
 <nav class="tabs" id="tabs">
   <button data-view="board" class="active">Board</button>
   <button data-view="detail">Detail</button>
+  <button data-view="farm">Farm next</button>
+  <button data-view="ledger">Ledger · 758</button>
   <button data-view="audit">Model &amp; audit</button>
   <button data-view="comps">Live comps</button>
 </nav>
@@ -33,16 +35,37 @@
     <table class="board">
       <thead><tr>
         <th data-sort="rank">#</th><th data-sort="name">Protocol</th><th data-sort="category">Category</th>
-        <th data-sort="tvl_usd" class="num">TVL</th><th data-sort="implied_value_usd" class="num">Implied</th>
-        <th data-sort="low_usd" class="num">Low</th><th data-sort="multiple" class="num">Multiple</th>
+        <th data-sort="tvl_usd" class="num">TVL</th><th data-sort="implied_value_usd" class="num">Expected</th>
+        <th data-sort="odds" class="num">Odds</th><th data-sort="implied_usd" class="num">Implied</th>
         <th data-sort="verdict">Farm verdict</th>
       </tr></thead>
       <tbody id="boardBody"></tbody>
     </table>
-    <p class="muted note">Implied is the model's base case. Low is the base case divided by the band factor k from the leave-one-out backtest. A flagged row carries a 0.10 haircut and its reason on the detail view.</p>
+    <p class="muted note">Expected is the board's ranking value: implied value if the token launched, times the fitted odds it ever does. Implied is the if-it-launched value. A flagged row carries a 0.10 haircut and its reason on the detail view. Rank ranges from 200 bootstrap refits are on the detail view.</p>
   </section>
   <section id="view-detail" class="view hidden">
     <div id="detailBody"></div>
+  </section>
+  <section id="view-farm" class="view hidden">
+    <h2>Farm next — by expected net per dollar</h2>
+    <p class="muted">The twenty farm plans with the best expected net at the low end per dollar of capital. Expected net is odds-weighted: a plan only counts if the token is likely enough to list for the low-end slice to cover the capital, gas and time. Verdicts still apply — a skip here means the row is flagged or a curator, whatever the ratio says.</p>
+    <table class="board">
+      <thead><tr><th>#</th><th>Protocol</th><th class="num">Expected</th><th class="num">Capital</th><th class="num">Net (low)</th><th class="num">Net / $</th><th>Verdict</th></tr></thead>
+      <tbody id="farmBody"></tbody>
+    </table>
+  </section>
+  <section id="view-ledger" class="view hidden">
+    <h2>Ledger — all 758 protocols accounted for</h2>
+    <p class="muted">Nothing in the snapshot is dropped silently. The launch board holds 198 pre-token protocols; the rest are here with their disposition: not a launch (bridges, exchanges, wrapped/staked products), token recorded but no market cap, already trades, or dead token.</p>
+    <div class="controls">
+      <select id="ledgerGroup" aria-label="Disposition"><option value="">All dispositions</option></select>
+      <input id="ledgerQ" type="search" placeholder="Search name or slug…" aria-label="Search ledger">
+      <span id="ledgerCount" class="muted"></span>
+    </div>
+    <table class="board">
+      <thead><tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th>Disposition</th><th>Detail</th><th class="num">Value</th></tr></thead>
+      <tbody id="ledgerBody"></tbody>
+    </table>
   </section>
   <section id="view-audit" class="view hidden">
     <h2>Model &amp; audit</h2>
@@ -58,7 +81,7 @@
   </section>
 </main>
 <footer class="muted">
-  <p>Snapshot as of <span id="asOf"></span> — 758 protocols. The model is a ranking tool with honest error bars, not a price forecast: only about 3 in 10 comparables land within 2x of the model. The 0.6 stage discount is a disclosed prior, not a fit. No points program is inventoried anywhere in this snapshot.</p>
+  <p>Snapshot as of <span id="asOf"></span> — 758 protocols, all accounted for in the ledger. The model is a ranking tool with honest error bars, not a price forecast: only about 3 in 10 comparables land within 2x of the model. The flat 0.6 stage discount of earlier rounds is retired — the listing-odds model fits the same fact from the data, per row. Expected value is implied value times those odds. No points program is inventoried anywhere in this snapshot.</p>
 </footer>
 <script src="../data.js"></script>
 <script src="app.js"></script>

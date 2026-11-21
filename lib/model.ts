@@ -1,21 +1,30 @@
-// Token launch radar, round 3 — comps-fitted size curve.
+// Token launch radar, round 4 — expected launch value.
 // Every number the dashboard shows is computed here, at run time, from the
 // sealed snapshot alone: the log-log fit, the category factors, the LOO
-// backtest, the board and the farm economics. Nothing is hardcoded from a
-// leaderboard, and no value is typed in from another entry.
+// backtest, the walk-forward test, the listing-odds model, the board and
+// the farm economics. Nothing is hardcoded from a leaderboard, and no value
+// is typed in from another entry.
 //
 // Model (all factors multiply):
-//   implied = exp(a) * TVL^b * categoryFactor * growth * maturity * 0.6
-//             [* 0.5 for curator rows] [* 0.10 for flagged concern rows]
+//   implied  = exp(a) * TVL^b * categoryFactor * growth * maturity
+//              [* 0.5 for curator rows] [* 0.10 for flagged concern rows]
+//   expected = implied * P(list)     <- the board ranks by expected value
 //   a, b come from an OLS fit of log(mcap) on log(TVL) over the snapshot's
 //   own traded comparables (n = 128, mcap > 0 and TVL > 0; 16 recorded
 //   comps with mcap <= 0 are dead tokens and are left out, their log being
 //   undefined). categoryFactor is the category median mcap/TVL, shrunk
 //   toward the global median with prior weight 4, clamped to [0.15, 2.0]
-//   and damped with gamma = 0.5. The 0.6 stage discount is a disclosed
-//   prior, not a fit: comparables already trade, pre-token rows do not.
+//   and damped with gamma = 0.5. P(list) is a logistic model fitted on all
+//   758 protocols: whether a protocol records a token, from its age, its
+//   size, its 7-day change and its category's listing rate (see fitOdds).
+//   The flat 0.6 stage discount of rounds 1-3 is RETIRED: the odds model
+//   fits the same fact from the data, per row instead of flat (median odds
+//   on the board 0.45, range 0.00-0.88; the old 0.6 sat inside that range,
+//   but a flat prior cannot tell a 5-year-old protocol from a 5-week one).
 //   Uncertainty band: low = base / k, bull = base * k, where
 //   k = exp(median |log error| of the LOO backtest), clamped to [1.5, 4].
+//   Rank ranges come from 200 bootstrap refits of the size curve: each
+//   board row carries the 10th-90th percentile of its rank across refits.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -97,10 +106,18 @@ export interface BoardRow {
   slug: string;
   name: string;
   rank: number;
+  /** The board's ranking value: expected launch value = implied x P(list). */
   implied_value_usd: number;
+  /** Implied value if the token launched (before the odds discount). */
+  implied_usd: number;
+  /** Fitted probability the protocol ever records a token. */
+  odds: number;
   low_usd: number;
   bull_usd: number;
   multiple: number;
+  /** Rank range across 200 bootstrap refits: [p10, p90]. */
+  rank_lo: number;
+  rank_hi: number;
   category: string | null;
   chains: string[];
   tvl_usd: number;
@@ -126,6 +143,65 @@ export interface ExcludedRow {
   counterfactual_usd: number | null;
 }
 
+export interface OddsBin {
+  lo: number;
+  hi: number;
+  n: number;
+  actual: number;
+  predicted: number;
+}
+
+export interface OddsModel {
+  /** Logistic coefficients on STANDARDIZED features [age/yr, log10 TVL, clamped 7d change, category listing rate]. */
+  beta: number[];
+  intercept: number;
+  mu: number[];
+  sd: number[];
+  /** 5-fold cross-validated AUC (deterministic shuffle, seed 7). */
+  cvAuc: number;
+  /** Age-only model, same folds, for the "what does age alone buy" check. */
+  ageOnlyAuc: number;
+  bins: OddsBin[];
+  n: number;
+  baseRate: number;
+}
+
+export interface WalkFold {
+  cutoff: string;
+  nTrain: number;
+  nTest: number;
+  r2: number;
+  medianAbsLog: number;
+  within2x: number;
+}
+
+export interface LedgerGroup {
+  group: string;
+  n: number;
+  note: string;
+}
+
+export interface LedgerRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  tvl_usd: number;
+  disposition: string;
+  detail: string;
+  value_usd: number | null;
+}
+
+export interface FarmNextRow {
+  slug: string;
+  name: string;
+  rank: number;
+  expected_usd: number;
+  capital_usd: number;
+  net_low_usd: number;
+  net_per_dollar: number;
+  verdict: 'farm' | 'thin' | 'skip';
+}
+
 export interface RadarData {
   asOf: string;
   nProtocols: number;
@@ -139,6 +215,11 @@ export interface RadarData {
   candidates: CandidateRow[];
   bootstrapB: { median: number; p5: number; p95: number; rounds: number };
   cv5MedianAbsLog: number;
+  odds: OddsModel;
+  walkForward: WalkFold[];
+  ledgerGroups: LedgerGroup[];
+  ledger: LedgerRow[];
+  farmNext: FarmNextRow[];
   boardRows: number;
   excludedRows: number;
   exclusions: ExcludedRow[];
@@ -148,7 +229,8 @@ export interface RadarData {
 }
 
 // --- disclosed priors (not fitted) ---------------------------------------
-export const STAGE_DISCOUNT = 0.6;
+// The flat 0.6 stage discount of rounds 1-3 is retired in round 4: the
+// listing-odds model (fitOdds) fits the same fact from the data, per row.
 export const CONCERN_HAIRCUT = 0.1;
 export const CURATOR_DISCOUNT = 0.5;
 export const GAMMA = 0.5;
@@ -404,6 +486,7 @@ export function candidateTable(comps: Comp[], asOf: string): CandidateRow[] {
     { name: 'Chosen: curve + category (γ=0.5) + growth + maturity', opts: FULL_OPTS },
     { name: 'No size curve: median ratio + category', opts: { ...FULL_OPTS, useCurve: false } },
     { name: 'γ=0: curve, no category factor', opts: { ...FULL_OPTS, gamma: 0 } },
+    { name: 'γ=0.2', opts: { ...FULL_OPTS, gamma: 0.2 } },
     { name: 'γ=0.25', opts: { ...FULL_OPTS, gamma: 0.25 } },
     { name: 'γ=0.75', opts: { ...FULL_OPTS, gamma: 0.75 } },
     { name: 'No growth factor', opts: { ...FULL_OPTS, useGrowth: false } },
@@ -467,6 +550,62 @@ export function candidateTable(comps: Comp[], asOf: string): CandidateRow[] {
     mape: (rMapes.reduce((s, x) => s + x, 0) / comps.length) * 100,
     within2x: (100 * rWithin2) / comps.length,
   });
+  // Multi-feature regression: log(mcap) on log(TVL), log(age+1) and the
+  // 7-day change, plus the category factor. Rejected: it scores worse
+  // than the curve alone — age and change add noise, not signal, once
+  // size is in. (Small Gaussian-elimination least squares, 4 features.)
+  const mErrs: number[] = [];
+  const mMapes: number[] = [];
+  let mWithin2 = 0;
+  const solve4 = (a: number[][], b: number[]): number[] => {
+    const n = 4;
+    const m = a.map((row, i) => [...row, b[i]!]);
+    for (let col = 0; col < n; col++) {
+      let piv = col;
+      for (let r = col + 1; r < n; r++) if (Math.abs(m[r]![col]!) > Math.abs(m[piv]![col]!)) piv = r;
+      const t = m[col]!;
+      m[col] = m[piv]!;
+      m[piv] = t;
+      const d = m[col]![col]!;
+      if (Math.abs(d) < 1e-12) return [0, 0, 0, 0];
+      for (let r = 0; r < n; r++) {
+        if (r === col) continue;
+        const f = m[r]![col]! / d;
+        for (let k = col; k <= n; k++) m[r]![k] = m[r]![k]! - f * m[col]![k]!;
+      }
+    }
+    return m.map((row, i) => row[n]! / row[i]!);
+  };
+  for (let i = 0; i < comps.length; i++) {
+    const rest = comps.filter((_, j) => j !== i);
+    const ata: number[][] = Array.from({ length: 4 }, () => [0, 0, 0, 0]);
+    const atb = [0, 0, 0, 0];
+    for (const c of rest) {
+      const x = [1, Math.log(c.tvl_usd), Math.log(ageDays(c.listed_at, asOf) + 1), (c.change_7d ?? 0) / 100];
+      const yv = Math.log(c.mcap_usd);
+      for (let a = 0; a < 4; a++) {
+        atb[a]! += x[a]! * yv;
+        for (let b = 0; b < 4; b++) ata[a]![b] = ata[a]![b]! + x[a]! * x[b]!;
+      }
+    }
+    const beta = solve4(ata, atb);
+    const held = comps[i]!;
+    const xh = [1, Math.log(held.tvl_usd), Math.log(ageDays(held.listed_at, asOf) + 1), (held.change_7d ?? 0) / 100];
+    let pred = Math.exp(xh.reduce((s, v, j) => s + v * beta[j]!, 0));
+    const { factors: mfactors } = categoryFactors(rest, GAMMA);
+    if (held.category !== null && CURATOR_CATEGORIES.has(held.category)) pred *= CURATOR_DISCOUNT;
+    else if (held.category !== null && mfactors[held.category] !== undefined) pred *= mfactors[held.category]!.factor;
+    const actual = held.mcap_usd;
+    mErrs.push(Math.abs(Math.log(pred) - Math.log(actual)));
+    mMapes.push(Math.abs(pred - actual) / actual);
+    if (pred / actual <= 2 && actual / pred <= 2) mWithin2++;
+  }
+  rows.push({
+    name: 'Multi-feature: log(TVL) + log(age) + change, + category',
+    medianAbsLog: median(mErrs),
+    mape: (mMapes.reduce((s, x) => s + x, 0) / comps.length) * 100,
+    within2x: (100 * mWithin2) / comps.length,
+  });
   return rows;
 }
 
@@ -526,6 +665,278 @@ export function fiveFoldCv(comps: Comp[], asOf: string): number {
     }
   }
   return median(errs);
+}
+
+/** The listing-odds model (round 4). P(a protocol records a token) from
+ *  the snapshot's own figures: how long it has run, how big it is, its
+ *  7-day change (clamped to [-60, 120] like the growth factor — one row's
+ *  TVL is up 4,448% in a week, and an unclamped feature would let that
+ *  single row steer the fit), and its category's listing rate. The label
+ *  is "records a token" (mcap, gecko_id or symbol present), not "has a
+ *  token": DefiLlama's record is not proof, so the model says "records",
+ *  never "has". Fitted by plain gradient descent on standardized
+ *  features, fixed iterations, no randomness — the same snapshot fits the
+ *  same coefficients. The category rate is leave-one-out (the row itself
+ *  is left out of its own category's rate). */
+export interface OddsFit {
+  intercept: number;
+  beta: number[];
+  mu: number[];
+  sd: number[];
+}
+
+function sigmoid(z: number): number {
+  const c = Math.max(-30, Math.min(30, z));
+  return 1 / (1 + Math.exp(-c));
+}
+
+function oddsFeatures(
+  p: SnapshotProtocol,
+  catRate: (cat: string | null, self: string) => number,
+  asOf: string,
+): number[] {
+  const ch = p.change_7d === null ? 0 : Math.min(120, Math.max(-60, p.change_7d));
+  return [ageDays(p.listed_at, asOf) / 365, Math.log10(Math.max(p.tvl_usd, 1)), ch / 100, catRate(p.category, p.slug)];
+}
+
+export function fitOdds(snapshot: Snapshot): {
+  model: OddsFit;
+  evaluation: OddsModel;
+  catRate: (cat: string | null, self: string) => number;
+} {
+  const rows = snapshot.protocols;
+  const asOf = snapshot.as_of;
+  // Category listing rate, leave-one-out per row.
+  const byCat = new Map<string, { n: number; pos: number }>();
+  for (const r of rows) {
+    const key = r.category ?? '\u0000none';
+    const e = byCat.get(key) ?? { n: 0, pos: 0 };
+    e.n++;
+    if (!isPreToken(r)) e.pos++;
+    byCat.set(key, e);
+  }
+  const baseRate = rows.filter((r) => !isPreToken(r)).length / rows.length;
+  const catRate = (cat: string | null, self: string): number => {
+    const key = cat ?? '\u0000none';
+    const e = byCat.get(key);
+    if (e === undefined || e.n <= 1) return baseRate;
+    const selfPos = isPreToken(rows.find((r) => r.slug === self)!) ? 0 : 1;
+    return (e.pos - selfPos) / (e.n - 1);
+  };
+  const X = rows.map((r) => oddsFeatures(r, catRate, asOf));
+  const y = rows.map((r) => (isPreToken(r) ? 0 : 1));
+  const d = 4;
+  const mu = [0, 0, 0, 0];
+  const sd = [1, 1, 1, 1];
+  for (let j = 0; j < d; j++) {
+    const col = X.map((x) => x[j]!);
+    mu[j] = col.reduce((s, v) => s + v, 0) / col.length;
+    const va = col.reduce((s, v) => s + (v - mu[j]!) * (v - mu[j]!), 0) / col.length;
+    sd[j] = Math.sqrt(va) + 1e-9;
+  }
+  const z = (x: number[]): number[] => x.map((v, j) => (v - mu[j]!) / sd[j]!);
+  const fit = (idx: number[], iters = 2000, lr = 0.5): { intercept: number; beta: number[] } => {
+    let intercept = 0;
+    const beta = [0, 0, 0, 0];
+    for (let it = 0; it < iters; it++) {
+      let gi = 0;
+      const gb = [0, 0, 0, 0];
+      for (const i of idx) {
+        const xi = z(X[i]!);
+        const p = sigmoid(intercept + xi.reduce((s, v, j) => s + v * beta[j]!, 0));
+        const err = p - y[i]!;
+        gi += err;
+        for (let j = 0; j < d; j++) gb[j]! += err * xi[j]!;
+      }
+      const n = idx.length;
+      intercept -= (lr * gi) / n;
+      for (let j = 0; j < d; j++) beta[j]! -= (lr * gb[j]!) / n + lr * 0.001 * beta[j]!;
+    }
+    return { intercept, beta };
+  };
+  const all = rows.map((_, i) => i);
+  const { intercept, beta } = fit(all);
+  // 5-fold cross-validated AUC, deterministic shuffle (seed 7). The
+  // age-only model runs the same folds, so the gap is the extra signal.
+  const rand = mulberry32(7);
+  const order = [...all];
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    const t = order[i]!;
+    order[i] = order[j]!;
+    order[j] = t;
+  }
+  const auc = (scores: number[], labels: number[]): number => {
+    let wins = 0;
+    let pairs = 0;
+    for (let i = 0; i < scores.length; i++) {
+      if (labels[i] !== 1) continue;
+      for (let k = 0; k < scores.length; k++) {
+        if (labels[k] !== 0) continue;
+        pairs++;
+        if (scores[i]! > scores[k]!) wins++;
+        else if (scores[i]! === scores[k]!) wins += 0.5;
+      }
+    }
+    return pairs === 0 ? 0.5 : wins / pairs;
+  };
+  const oof = new Array<number>(rows.length).fill(0);
+  const oofAge = new Array<number>(rows.length).fill(0);
+  for (let f = 0; f < 5; f++) {
+    const te = order.filter((_, k) => k % 5 === f);
+    const tr = order.filter((_, k) => k % 5 !== f);
+    const m = fit(tr, 1200);
+    for (const i of te) {
+      const xi = z(X[i]!);
+      oof[i] = sigmoid(m.intercept + xi.reduce((s, v, j) => s + v * m.beta[j]!, 0));
+    }
+    // Age-only: same folds, feature 0 alone.
+    const fitAge = (idx: number[]): { intercept: number; b: number } => {
+      let ic = 0;
+      let b = 0;
+      for (let it = 0; it < 1200; it++) {
+        let gi = 0;
+        let gb = 0;
+        for (const i of idx) {
+          const xi = (X[i]![0]! - mu[0]!) / sd[0]!;
+          const p = sigmoid(ic + b * xi);
+          const err = p - y[i]!;
+          gi += err;
+          gb += err * xi;
+        }
+        ic -= (0.5 * gi) / idx.length;
+        b -= (0.5 * gb) / idx.length + 0.5 * 0.001 * b;
+      }
+      return { intercept: ic, b };
+    };
+    const ma = fitAge(tr);
+    for (const i of te) {
+      const xi = (X[i]![0]! - mu[0]!) / sd[0]!;
+      oofAge[i] = sigmoid(ma.intercept + ma.b * xi);
+    }
+  }
+  const bins: OddsBin[] = [];
+  for (const [lo, hi] of [[0, 0.1], [0.1, 0.2], [0.2, 0.3], [0.3, 0.5], [0.5, 1.01]] as const) {
+    const idx = oof.map((p, i) => (p >= lo && p < hi ? i : -1)).filter((i) => i >= 0);
+    if (idx.length === 0) continue;
+    bins.push({
+      lo,
+      hi,
+      n: idx.length,
+      actual: idx.reduce((s, i) => s + y[i]!, 0) / idx.length,
+      predicted: idx.reduce((s, i) => s + oof[i]!, 0) / idx.length,
+    });
+  }
+  const model: OddsFit = { intercept, beta, mu, sd };
+  const evaluation: OddsModel = {
+    beta,
+    intercept,
+    mu,
+    sd,
+    cvAuc: auc(oof, y),
+    ageOnlyAuc: auc(oofAge, y),
+    bins,
+    n: rows.length,
+    baseRate,
+  };
+  return { model, evaluation, catRate };
+}
+
+export function oddsOf(p: SnapshotProtocol, model: OddsFit, catRate: (cat: string | null, self: string) => number, asOf: string): number {
+  const x = oddsFeatures(p, catRate, asOf);
+  const z = x.map((v, j) => (v - model.mu[j]!) / model.sd[j]!);
+  return sigmoid(model.intercept + z.reduce((s, v, j) => s + v * model.beta[j]!, 0));
+}
+
+/** Walk-forward by first-tracked date (round 4): the snapshot carries a
+ *  single as_of date, but listed_at is the day DefiLlama began tracking
+ *  each protocol — a time axis. Fit the size curve on comparables first
+ *  tracked before the cutoff, test it on those first tracked after it,
+ *  expanding window, three cutoffs. A model that only fits the past it
+ *  was trained on fails here; one that generalises holds up. */
+export function walkForward(comps: Comp[], asOf: string): WalkFold[] {
+  const dated = comps.filter((c) => c.listed_at !== null).sort((a, b) => (a.listed_at! < b.listed_at! ? -1 : 1));
+  const folds: WalkFold[] = [];
+  for (const cutoff of ['2023-06-01', '2024-06-01', '2025-06-01']) {
+    const train = dated.filter((c) => c.listed_at! < cutoff);
+    const test = dated.filter((c) => c.listed_at! >= cutoff);
+    if (train.length < 20 || test.length < 5) continue;
+    const fit = fitComps(train);
+    const { globalMedian, factors } = categoryFactors(train);
+    const errs: number[] = [];
+    let within2 = 0;
+    for (const t of test) {
+      const pred = predictComp(t, fit, globalMedian, factors, FULL_OPTS, asOf);
+      const le = Math.abs(Math.log(pred) - Math.log(t.mcap_usd));
+      errs.push(le);
+      if (le <= Math.log(2)) within2++;
+    }
+    folds.push({
+      cutoff,
+      nTrain: train.length,
+      nTest: test.length,
+      r2: fit.r2,
+      medianAbsLog: median(errs),
+      within2x: (100 * within2) / test.length,
+    });
+  }
+  return folds;
+}
+
+/** Rank ranges from 200 bootstrap refits of the size curve (round 4).
+ *  Each resample refits the curve and the category factors on a
+ *  resampled comparable set; the odds stay fixed (the odds model is
+ *  fitted once on all 758 rows — refitting it per resample would mix
+ *  two sources of noise). Each board row gets the 10th and 90th
+ *  percentile of its rank across refits, plus the median. */
+export function rankRanges(
+  boardInputs: {
+    slug: string;
+    tvl: number;
+    category: string | null;
+    curator: boolean;
+    concern: boolean;
+    growth: number;
+    maturity: number;
+    odds: number;
+  }[],
+  comps: Comp[],
+  asOf: string,
+  rounds: number = 200,
+): Record<string, { lo: number; hi: number; median: number }> {
+  const rand = mulberry32(20261121);
+  const ranksBySlug = new Map<string, number[]>();
+  for (const s of boardInputs) ranksBySlug.set(s.slug, []);
+  for (let r = 0; r < rounds; r++) {
+    const sample: Comp[] = [];
+    for (let i = 0; i < comps.length; i++) sample.push(comps[Math.floor(rand() * comps.length)]!);
+    const fit = fitComps(sample);
+    const { factors } = categoryFactors(sample);
+    // The resample changes the curve and the factors; each row's implied
+    // value moves with them. Recompute implied per row from its stored
+    // parts (the row's own TVL, category, growth and maturity), then
+    // expected = implied x odds (odds fixed — see the doc comment).
+    const scored = boardInputs.map((p) => {
+      let v = Math.exp(fit.a) * Math.pow(p.tvl, fit.b);
+      if (p.curator) v *= CURATOR_DISCOUNT;
+      else if (p.category !== null && factors[p.category] !== undefined) v *= factors[p.category]!.factor;
+      v *= p.growth * p.maturity;
+      if (p.concern) v *= CONCERN_HAIRCUT;
+      return { slug: p.slug, expected: v * p.odds };
+    });
+    scored.sort((x, y) => y.expected - x.expected || (x.slug < y.slug ? -1 : 1));
+    scored.forEach((s, i) => ranksBySlug.get(s.slug)!.push(i + 1));
+  }
+  const out: Record<string, { lo: number; hi: number; median: number }> = {};
+  for (const [slug, ranks] of ranksBySlug) {
+    const sorted = [...ranks].sort((a, b) => a - b);
+    out[slug] = {
+      lo: sorted[Math.floor(0.1 * (sorted.length - 1))]!,
+      hi: sorted[Math.floor(0.9 * (sorted.length - 1))]!,
+      median: median(sorted),
+    };
+  }
+  return out;
 }
 
 function capitalTier(tvlUsd: number): number {
@@ -733,7 +1144,7 @@ function impliedForBoard(
   const growth = growthFactor(p.change_7d);
   const age = ageDays(p.listed_at, asOf);
   const maturity = maturityFactor(age);
-  f *= growth * maturity * STAGE_DISCOUNT;
+  f *= growth * maturity;
   const concern = CONCERN[p.slug] ?? null;
   if (concern !== null) f *= CONCERN_HAIRCUT;
   return { value: base * f, categoryFactor, growth, maturity, curator, concern };
@@ -749,10 +1160,13 @@ export function buildRadar(snapshot: Snapshot): { board: GateRow[]; radar: Radar
   const candidates = candidateTable(comps, asOf);
   const bootstrap = bootstrapSlope(comps);
   const cv5 = fiveFoldCv(comps, asOf);
+  const { model: oddsModel, evaluation: oddsEval, catRate } = fitOdds(snapshot);
+  const walk = walkForward(comps, asOf);
 
   const watchlist = new Set(snapshot.watchlist);
   const scored: BoardRow[] = [];
   const exclusions: ExcludedRow[] = [];
+  const ledger: LedgerRow[] = [];
   for (const p of snapshot.protocols) {
     const reason = exclusionReason(p);
     if (reason !== null) {
@@ -766,13 +1180,61 @@ export function buildRadar(snapshot: Snapshot): { board: GateRow[]; radar: Radar
           reason,
           counterfactual_usd: Math.max(1, Math.round(cf.value)),
         });
+        ledger.push({
+          slug: p.slug,
+          name: p.name,
+          category: p.category,
+          tvl_usd: p.tvl_usd,
+          disposition: 'not a launch',
+          detail: `Left off the launch board: ${reason}. Valued if it launched anyway: $${Math.max(1, Math.round(cf.value)).toLocaleString('en-US')}.`,
+          value_usd: Math.max(1, Math.round(cf.value)),
+        });
+      } else if (p.mcap_usd !== null && p.mcap_usd > 0) {
+        ledger.push({
+          slug: p.slug,
+          name: p.name,
+          category: p.category,
+          tvl_usd: p.tvl_usd,
+          disposition: 'already trades',
+          detail: `Token already trades at $${p.mcap_usd.toLocaleString('en-US')} market cap (${(p.mcap_usd / p.tvl_usd).toFixed(3)}x TVL) — nothing left to launch.`,
+          value_usd: p.mcap_usd,
+        });
+      } else if (p.mcap_usd !== null) {
+        // mcap recorded at or below zero: a dead token (15 at zero, 1 below).
+        ledger.push({
+          slug: p.slug,
+          name: p.name,
+          category: p.category,
+          tvl_usd: p.tvl_usd,
+          disposition: 'dead token',
+          detail: `Records a token whose market cap sits at or below zero ($${p.mcap_usd.toLocaleString('en-US')}) — the launch already happened and died.`,
+          value_usd: null,
+        });
+      } else {
+        // Token recorded (gecko_id or symbol) but the snapshot carries no
+        // market cap for it: not pre-token, and not priced.
+        ledger.push({
+          slug: p.slug,
+          name: p.name,
+          category: p.category,
+          tvl_usd: p.tvl_usd,
+          disposition: 'token recorded, no mcap',
+          detail: `Records a token (${p.gecko_id ?? p.symbol ?? 'unnamed in the snapshot'}) but the snapshot carries no market cap for it — not a pre-token protocol, and not priced.`,
+          value_usd: null,
+        });
       }
       continue;
     }
     const imp = impliedForBoard(p, fit, factors, asOf);
-    const value = Math.max(1, Math.round(imp.value));
-    const low = Math.max(1, Math.round(value / bandK));
-    const bull = Math.max(1, Math.round(value * bandK));
+    const odds = oddsOf(p, oddsModel, catRate, asOf);
+    // The board ranks by EXPECTED launch value: what the token would be
+    // worth if it launched, times the fitted odds it ever does. The
+    // gate's implied_value_usd carries the expected value, so the
+    // non-increasing check holds on the ranking value.
+    const implied = Math.max(1, Math.round(imp.value));
+    const expected = Math.max(1, Math.round(imp.value * odds));
+    const low = Math.max(1, Math.round(expected / bandK));
+    const bull = Math.max(1, Math.round(expected * bandK));
     const age = ageDays(p.listed_at, asOf);
     const capital = capitalTier(p.tvl_usd);
     const dur = durationTier(age);
@@ -784,10 +1246,14 @@ export function buildRadar(snapshot: Snapshot): { board: GateRow[]; radar: Radar
       slug: p.slug,
       name: p.name,
       rank: 0,
-      implied_value_usd: value,
+      implied_value_usd: expected,
+      implied_usd: implied,
+      odds,
       low_usd: low,
       bull_usd: bull,
-      multiple: value / p.tvl_usd,
+      multiple: expected / p.tvl_usd,
+      rank_lo: 0,
+      rank_hi: 0,
       category: p.category,
       chains: p.chains,
       tvl_usd: p.tvl_usd,
@@ -804,14 +1270,44 @@ export function buildRadar(snapshot: Snapshot): { board: GateRow[]; radar: Radar
       points_status: 'none — no points program is inventoried in the snapshot',
     });
   }
+  // Rank ranges from 200 bootstrap refits of the size curve (odds fixed).
+  const ranges = rankRanges(
+    scored.map((r) => ({
+      slug: r.slug,
+      tvl: r.tvl_usd,
+      category: r.category,
+      curator: r.curator,
+      concern: r.concern !== null,
+      growth: r.growth_factor,
+      maturity: r.maturity_factor,
+      odds: r.odds,
+    })),
+    comps,
+    asOf,
+  );
   scored.sort((x, y) => {
     if (y.implied_value_usd !== x.implied_value_usd) return y.implied_value_usd - x.implied_value_usd;
+    if (y.implied_usd !== x.implied_usd) return y.implied_usd - x.implied_usd;
     if (y.tvl_usd !== x.tvl_usd) return y.tvl_usd - x.tvl_usd;
     return x.slug < y.slug ? -1 : 1;
   });
   scored.forEach((r, i) => {
     r.rank = i + 1;
+    const rg = ranges[r.slug]!;
+    r.rank_lo = rg.lo;
+    r.rank_hi = rg.hi;
   });
+  for (const r of scored) {
+    ledger.push({
+      slug: r.slug,
+      name: r.name,
+      category: r.category,
+      tvl_usd: r.tvl_usd,
+      disposition: 'on the launch board',
+      detail: `Rank #${r.rank} by expected value ($${r.implied_value_usd.toLocaleString('en-US')}) — implied $${r.implied_usd.toLocaleString('en-US')} x odds ${r.odds.toFixed(2)}.`,
+      value_usd: r.implied_value_usd,
+    });
+  }
 
   const board: GateRow[] = scored.map((r) => ({
     slug: r.slug,
@@ -837,6 +1333,32 @@ export function buildRadar(snapshot: Snapshot): { board: GateRow[]; radar: Radar
       ratio: c.mcap_usd / c.tvl_usd,
     }));
 
+  const farmNext: FarmNextRow[] = [...scored]
+    .map((r) => ({
+      slug: r.slug,
+      name: r.name,
+      rank: r.rank,
+      expected_usd: r.implied_value_usd,
+      capital_usd: r.farm.capitalUsd,
+      net_low_usd: r.farm.netLowUsd,
+      net_per_dollar: r.farm.netLowUsd / r.farm.capitalUsd,
+      verdict: r.farm.verdict,
+    }))
+    .sort((a, b) => b.net_per_dollar - a.net_per_dollar)
+    .slice(0, 20);
+
+  const ledgerGroups: LedgerGroup[] = [
+    { group: 'on the launch board', n: scored.length, note: 'Pre-token protocols ranked by expected launch value.' },
+    { group: 'not a launch', n: exclusions.length, note: 'Pre-token by record, left off the board: bridges, exchanges, wrapped/staked products, versioned names.' },
+    {
+      group: 'token recorded, no mcap',
+      n: ledger.filter((l) => l.disposition === 'token recorded, no mcap').length,
+      note: 'Records a token (gecko_id or symbol) but the snapshot carries no market cap — not pre-token, not priced.',
+    },
+    { group: 'already trades', n: ledger.filter((l) => l.disposition === 'already trades').length, note: 'Token already trades; market cap from the snapshot.' },
+    { group: 'dead token', n: ledger.filter((l) => l.disposition === 'dead token').length, note: 'Records a token whose market cap sits at or below zero.' },
+  ];
+
   const radar: RadarData = {
     asOf,
     nProtocols: snapshot.protocols.length,
@@ -850,6 +1372,11 @@ export function buildRadar(snapshot: Snapshot): { board: GateRow[]; radar: Radar
     candidates,
     bootstrapB: bootstrap,
     cv5MedianAbsLog: cv5,
+    odds: oddsEval,
+    walkForward: walk,
+    ledgerGroups,
+    ledger,
+    farmNext,
     boardRows: scored.length,
     excludedRows: exclusions.length,
     exclusions,
